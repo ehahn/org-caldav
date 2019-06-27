@@ -790,9 +790,9 @@ If RESUME is non-nil, try to resume."
   (if (and org-caldav-event-list
 	   (not (eq org-caldav-resume-aborted 'never))
 	   (or (eq org-caldav-resume-aborted 'always)
-	       (and (eq org-caldav-resume-aborted 'ask))
-	       (y-or-n-p "Last sync seems to have been aborted. \
-Should I try to resume? ")))
+	       (and (eq org-caldav-resume-aborted 'ask)
+	            (y-or-n-p "Last sync seems to have been aborted. \
+Should I try to resume? "))))
       (org-caldav-sync-calendar org-caldav-previous-calendar t)
     (setq org-caldav-sync-result nil)
     (if (null org-caldav-calendars)
@@ -1043,7 +1043,7 @@ which can only be synced to calendar. Ignoring." uid))
 		;; Sync timestamp
 		(setq timesync
 		      (org-caldav-change-timestamp
-		       (apply 'org-caldav-create-time-range (butlast eventdata 3)))))
+		       (apply 'org-caldav-create-time-range (seq-take eventdata 4)))))
 	      (when (eq org-caldav-sync-changes-to-org 'all)
 		;; Sync everything, so first remove the old one.
 		(let ((level (org-current-level)))
@@ -1116,6 +1116,14 @@ NEWLOCATION contains newlines, replace them with
 			  (replace-regexp-in-string "\n" replacement newlocation))
       (org-delete-property "LOCATION"))))
 
+(defun org-caldav-change-class (newclass)
+  "Change the CLASS property from ORG item under point to
+NEWCLASS. If newclass is \"\", removes the class
+property."
+  (if (> (length newclass) 0)
+      (org-set-property "CLASS" newclass)
+    (org-delete-property "CLASS")))
+
 (defun org-caldav-change-timestamp (newtime)
   "Change timestamp from Org item under point to NEWTIME.
 Return symbol 'orgsexp if this entry cannot be changed because it
@@ -1142,9 +1150,29 @@ is on s-expression."
   (when (eq backend 'icalendar)
     (org-map-entries
      (lambda ()
-       (let ((pt (apply 'org-agenda-skip-entry-if org-caldav-skip-conditions)))
-	 (when pt
-	   (delete-region (point) pt)))))))
+       (let ((pt (save-excursion (apply 'org-agenda-skip-entry-if org-caldav-skip-conditions))))
+		 (when pt (delete-region (point) (- pt 1))))))))
+
+
+(defun org-caldav-create-uid (file &optional bell)
+  "Set ID property on headlines missing it in FILE.
+When optional argument BELL is non-nil, inform the user with
+a message if the file was modified. This func is the same as
+org-icalendar-create-uid except that it ignores entries that
+match org-caldav-skip-conditions."
+  (let (modified-flag)
+    (org-map-entries
+     (lambda ()
+       (let ((entry (org-element-at-point)))
+         (unless (org-element-property :ID entry)
+           (unless (apply 'org-agenda-skip-entry-if org-caldav-skip-conditions)
+             (org-id-get-create)
+             (setq modified-flag t)
+             (forward-line)))))
+     nil nil 'comment)
+    (when (and bell modified-flag)
+      (message "ID properties created in file \"%s\"" file)
+      (sit-for 2))))
 
 (defun org-caldav-generate-ics ()
   "Generate ICS file from `org-caldav-files'.
@@ -1160,8 +1188,8 @@ Returns buffer containing the ICS file."
 			      (list inbox-file)))))
 	(org-export-select-tags org-caldav-select-tags)
 	(org-icalendar-exclude-tags org-caldav-exclude-tags)
-	;; We absolutely need UIDs for synchronization.
-	(org-icalendar-store-UID t)
+        ;; We create UIDs ourselves and do not rely on ox-icalendar.el
+	(org-icalendar-store-UID nil)
 	;; Does not work yet
 	(org-icalendar-include-bbdb-anniversaries nil)
 	(icalendar-uid-format "orgsexp-%h")
@@ -1177,6 +1205,9 @@ Returns buffer containing the ICS file."
 	   ";TZID=%Z:%Y%m%dT%H%M%S")
 	  (t
 	   ":%Y%m%dT%H%M%S"))))
+    (dolist (orgfile orgfiles)
+      (with-current-buffer (org-get-agenda-file-buffer orgfile)
+        (org-caldav-create-uid orgfile t)))
     (set icalendar-file (make-temp-file "org-caldav-"))
     (org-caldav-debug-print 1 (format "Generating ICS file %s."
 				      (symbol-value icalendar-file)))
@@ -1273,14 +1304,15 @@ Do nothing if LEVEL is larger than `org-caldav-debug-level'."
 		      (point-min))))
 
 (defun org-caldav-insert-org-entry (start-d start-t end-d end-t
-                                            summary description location
+                                            summary description location class
                                             &optional uid level)
   "Insert org block from given data at current position.
 START/END-D: Start/End date.  START/END-T: Start/End time.
-SUMMARY, DESCRIPTION, LOCATION, UID: obvious.
+SUMMARY, DESCRIPTION, LOCATION, CLASS, UID: obvious.
 Dates must be given in a format `org-read-date' can parse.
 
 If LOCATION is \"\", no LOCATION: property is written.
+If CLASS is \"\", no CLASS: property is written.
 If UID is nil, no UID: property is written.
 If LEVEL is nil, it defaults to 1.
 
@@ -1294,6 +1326,9 @@ Returns MD5 from entry."
   (when uid
     (org-set-property "ID" (url-unhex-string uid)))
   (org-caldav-change-location location)
+  (if (> (length class) 0)
+      (org-set-property "CLASS" class)
+    (org-delete-property "CLASS"))
   (org-set-tags-to org-caldav-select-tags)
   (md5 (buffer-substring-no-properties
 	(org-entry-beginning-position)
@@ -1478,7 +1513,7 @@ If COMPLEMENT is non-nil, return all item without errors."
 ;; The LOCATION property is added the extracted list
 (defun org-caldav-convert-event ()
   "Convert icalendar event in current buffer.
-Returns a list '(start-d start-t end-d end-t summary description location)'
+Returns a list '(start-d start-t end-d end-t summary description location class)'
 which can be fed into `org-caldav-insert-org-entry'."
   (let ((decoded (decode-coding-region (point-min) (point-max) 'utf-8 t)))
     (erase-buffer)
@@ -1521,6 +1556,9 @@ which can be fed into `org-caldav-insert-org-entry'."
 	 (location (icalendar--convert-string-for-import
                     (or (icalendar--get-event-property e 'LOCATION)
                         "")))
+	 (class (icalendar--convert-string-for-import
+                    (or (icalendar--get-event-property e 'CLASS)
+                        "")))
 	 (rrule (icalendar--get-event-property e 'RRULE))
 	 (rdate (icalendar--get-event-property e 'RDATE))
 	 (duration (icalendar--get-event-property e 'DURATION)))
@@ -1562,7 +1600,7 @@ which can be fed into `org-caldav-insert-org-entry'."
     ;; Return result
     (list start-d start-t
 	  (if end-t end-d end-1-d)
-	  end-t summary description location)))
+	  end-t summary description location class)))
 
 ;; This is adapted from url-dav.el, written by Bill Perry.
 ;; This does more error checking on the headers and retries
